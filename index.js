@@ -196,7 +196,7 @@ async function loginCallContact({ email, password, totp_code, since_minutes = 15
     ]);
 
     // chwila na przejście do 2FA
-    await page.waitForTimeout(1000);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
 
     // 6) 2FA: input.digit (6 pól)
     console.log('[8] Wait for 2FA inputs');
