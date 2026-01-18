@@ -36,14 +36,8 @@ async function loginAndGetRecordings(email, password, totpCode, sinceMinutes = 1
         await page.waitForSelector('button, a', { timeout: 10000 });
         
         // Szukamy przycisku z tekstem "ZALOGUJ SIĘ"
-        const loginButton = await page.evaluateHandle(() => {
-            const elements = [...document.querySelectorAll('button, a')];
-            return elements.find(el => el.textContent.includes('ZALOGUJ SIĘ'));
-        });
-        
-        if (loginButton) {
-            console.log('Klikam przycisk ZALOGUJ SIĘ...');
-            await loginButton.click();
+        console.log('Klikam przycisk Zaloguj się...');
+await page.click('button.LoginRegisterView__column__button');
         } else {
             throw new Error('Nie znaleziono przycisku ZALOGUJ SIĘ na stronie głównej');
         }
