@@ -121,7 +121,7 @@ async function loginCallContact({ email, password, totp_code, since_minutes = 15
     }
 
     // chwila na rozruch SPA
-    await page.waitForTimeout(1200);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
 
     // 2) klik "Zaloguj się" (czasem jest nawigacja, czasem nie)
     console.log('[3] Click "Zaloguj się"');
@@ -240,7 +240,7 @@ async function loginCallContact({ email, password, totp_code, since_minutes = 15
     ]);
 
     // chwila na SPA
-    await page.waitForTimeout(1200);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
 
     const currentUrl = page.url();
     console.log('[11] Current URL:', currentUrl);
