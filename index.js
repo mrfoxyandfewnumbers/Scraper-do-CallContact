@@ -35,8 +35,11 @@ async function loginAndGetRecordings(email, password, totpCode, sinceMinutes = 1
         console.log('Szukam przycisku Zaloguj się...');
         await page.waitForSelector('button.LoginRegisterView__column__button', { timeout: 10000 });
         
-        console.log('Klikam przycisk Zaloguj się...');
-        await page.click('button.LoginRegisterView__column__button');
+      console.log('Klikam przycisk Zaloguj się...');
+await Promise.all([
+    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
+    page.click('button.LoginRegisterView__column__button')
+]);
         
         // KROK 3: Czekamy na formularz logowania
         console.log('Czekam na formularz logowania...');
