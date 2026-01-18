@@ -7,239 +7,244 @@ const chromium = require('@sparticuz/chromium');
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
+const LOGIN_URL = 'https://user.callcontact.eu/';
+
 /**
- * ENV (ustaw na Render):
- * - PORT (Render ustawia sam)
- * - BAW_BASE_URL (np. https://twoj-portal.pl)
- * - BAW_LOGIN_URL (opcjonalnie; jeśli nie dasz, użyje BAW_BASE_URL)
- * - BAW_EMAIL
- * - BAW_PASSWORD
- *
- * Dla bezpieczeństwa: credentials tylko w ENV.
+ * Pomocnicze: bezpieczne zamykanie
  */
-
-const PORT = process.env.PORT || 3000;
-
-const BAW_BASE_URL = process.env.BAW_BASE_URL || '';
-const BAW_LOGIN_URL = process.env.BAW_LOGIN_URL || BAW_BASE_URL;
-
-const BAW_EMAIL = process.env.BAW_EMAIL || '';
-const BAW_PASSWORD = process.env.BAW_PASSWORD || '';
-
-let browserSingleton = null;
-
-/** Render-friendly launch */
-async function getBrowser() {
-  if (browserSingleton) return browserSingleton;
-
-  browserSingleton = await puppeteer.launch({
-    args: chromium.args,
-    defaultViewport: chromium.defaultViewport,
-    executablePath: await chromium.executablePath(),
-    headless: chromium.headless,
-    ignoreHTTPSErrors: true,
-  });
-
-  // Jeśli browser się wywali, wyczyść singleton, żeby kolejne requesty mogły go odtworzyć
-  browserSingleton.on('disconnected', () => {
-    browserSingleton = null;
-  });
-
-  return browserSingleton;
+async function safeCloseBrowser(browser) {
+  try { await browser.close(); } catch (_) {}
 }
 
 async function safeClosePage(page) {
-  try {
-    await page.close();
-  } catch (_) {}
-}
-
-function requireEnv(name, value) {
-  if (!value) {
-    throw new Error(`Missing required env: ${name}`);
-  }
+  try { await page.close(); } catch (_) {}
 }
 
 /**
- * Minimalny login flow:
- * 1) Wejście na login
- * 2) Klik "Zaloguj się" (jeśli jest)
- * 3) Wpisanie email/hasło
- * 4) Submit
- * 5) Oczekiwanie, aż UI po zalogowaniu będzie gotowy
- *
- * UWAGA: selektory są Twoje z poprzednich wersji:
- * - button.LoginRegisterView__column__button
- * - input[placeholder="Adres email"]
- * Jeśli portal ma inne selektory, podmienisz je w 2 miejscach.
+ * Pomocnicze: klik z “odczekaniem” na zmianę UI / nawigację (SPA friendly)
  */
-async function ensureLoggedIn(page) {
-  requireEnv('BAW_BASE_URL', BAW_BASE_URL);
-  requireEnv('BAW_EMAIL', BAW_EMAIL);
-  requireEnv('BAW_PASSWORD', BAW_PASSWORD);
+async function clickAndWait(page, clickSelector, waitForSelectorAfter, opts = {}) {
+  const {
+    clickTimeout = 15000,
+    waitTimeout = 30000,
+    navigation = false,
+  } = opts;
 
-  // 1) open
-  await page.goto(BAW_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
+  await page.waitForSelector(clickSelector, { timeout: clickTimeout });
 
-  // (opcjonalnie) jeśli jest przycisk przejścia do formularza logowania
-  const loginButtonSelector = 'button.LoginRegisterView__column__button';
-  const emailSelector = 'input[placeholder="Adres email"]';
-
-  const hasLoginButton = await page.$(loginButtonSelector);
-  if (hasLoginButton) {
-    console.log('[login] Klikam "Zaloguj się" button...');
-    // czasem to jest SPA (brak pełnej nawigacji), więc nie możemy polegać wyłącznie na waitForNavigation
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null),
-      page.click(loginButtonSelector),
-    ]);
-  }
-
-  // czekamy aż pokaże się input email (to jest najbardziej pewny sygnał)
-  await page.waitForSelector(emailSelector, { timeout: 20000 });
-
-  console.log('[login] Wpisuję email/hasło...');
-  await page.click(emailSelector, { clickCount: 3 });
-  await page.type(emailSelector, BAW_EMAIL, { delay: 10 });
-
-  // poniżej: selektor hasła może być inny — daję 2 najczęstsze podejścia
-  const passwordSelectors = [
-    'input[type="password"]',
-    'input[placeholder="Hasło"]',
-    'input[name="password"]',
-  ];
-
-  let passwordSel = null;
-  for (const sel of passwordSelectors) {
-    const el = await page.$(sel);
-    if (el) {
-      passwordSel = sel;
-      break;
-    }
-  }
-  if (!passwordSel) throw new Error('Nie znalazłem pola hasła (sprawdź selektor).');
-
-  await page.click(passwordSel, { clickCount: 3 });
-  await page.type(passwordSel, BAW_PASSWORD, { delay: 10 });
-
-  // submit (przycisk / enter)
-  // Spróbuj button type=submit, jak nie ma – Enter w haśle
-  const submitSelectors = [
-    'button[type="submit"]',
-    'button:has-text("Zaloguj")', // UWAGA: puppeteer nie wspiera :has-text natywnie; zostawiam jako komentarz
-  ];
-
-  const submitBtn = await page.$(submitSelectors[0]);
-  console.log('[login] Submit...');
-  if (submitBtn) {
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 45000 }).catch(() => null),
-      page.click(submitSelectors[0]),
+  if (navigation) {
+    // czasem jest nawigacja, czasem nie — nie wywalamy się jak nie ma
+    await Promise.allSettled([
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: waitTimeout }),
+      page.click(clickSelector),
     ]);
   } else {
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(1200);
+    await page.click(clickSelector);
   }
 
-  // Po logowaniu: dajemy oddech i sprawdzamy, czy nie ma dalej inputa email (czyli nadal na loginie)
-  await page.waitForTimeout(1200);
-
-  const stillOnLogin = await page.$(emailSelector);
-  if (stillOnLogin) {
-    // Nie zawsze oznacza fail (czasem UI zostaje), ale najczęściej tak.
-    // Jeżeli masz konkretny selektor po zalogowaniu – dodaj tu twardą walidację.
-    console.warn('[login] UWAGA: nadal widzę pole email – możliwy brak zalogowania.');
+  if (waitForSelectorAfter) {
+    await page.waitForSelector(waitForSelectorAfter, { timeout: waitTimeout });
   }
-
-  console.log('[login] Done.');
 }
 
 /**
- * Przykładowa funkcja, która po zalogowaniu idzie na stronę dokumentów
- * i zwraca dane.
- *
- * Ponieważ nie wkleiłeś tutaj finalnych endpointów portalu,
- * zostawiam to jako “szkielet”:
- * - możesz albo scrapować tabelę
- * - albo (lepiej) wywołać request XHR z cookies (page.evaluate fetch)
+ * Pomocnicze: wpisz do inputa (czyści pole)
  */
-async function fetchDocuments(page, { keyword = '', pageSize = 20, pageNumber = 0 } = {}) {
-  // TODO: podmień na realny URL po zalogowaniu, np. `${BAW_BASE_URL}/documents`
-  const documentsUrl = `${BAW_BASE_URL}`;
-  await page.goto(documentsUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-
-  // Jeśli masz konkretny API request, to tu najlepiej zrobić:
-  // - albo bezpośrednio HTTP request (axios) z tokenem/cookies
-  // - albo page.evaluate(() => fetch(...))
-  //
-  // Na teraz zwracam “diagnostycznie” URL i podstawowe info.
-  return {
-    ok: true,
-    note: 'Podmień fetchDocuments na realny scraping lub request do API portalu.',
-    keyword,
-    pageSize,
-    pageNumber,
-    currentUrl: page.url(),
-  };
+async function clearAndType(page, selector, value, delay = 40) {
+  await page.waitForSelector(selector, { timeout: 20000 });
+  await page.focus(selector);
+  await page.click(selector, { clickCount: 3 });
+  await page.keyboard.press('Backspace');
+  await page.type(selector, value, { delay });
 }
 
-/** Health */
-app.get('/health', async (req, res) => {
-  res.json({
-    status: 'ok',
-    browserActive: !!browserSingleton,
-    baseUrlSet: !!BAW_BASE_URL,
-  });
-});
-
 /**
- * POST /baw/documents
- * body: { keyword?: string, pageSize?: number, pageNumber?: number }
+ * Główna funkcja: logowanie do CallContact
+ * FLOW jest zgodny z Twoim oryginałem:
+ * 1) wejście
+ * 2) klik "Zaloguj się"
+ * 3) email
+ * 4) hasło
+ * 5) submit
+ * 6) 2FA (6 inputów)
+ * 7) submit
+ * 8) walidacja + cookies
  */
-app.post('/baw/documents', async (req, res) => {
-  const started = Date.now();
-  const { keyword = '', pageSize = 20, pageNumber = 0 } = req.body || {};
-
+async function loginCallContact(email, password, totpCode, sinceMinutes = 15) {
+  let browser = null;
   let page = null;
 
   try {
-    const browser = await getBrowser();
+    console.log('Uruchamiam przeglądarkę (Render-friendly chromium)...');
+
+    browser = await puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
+      ignoreHTTPSErrors: true,
+    });
+
     page = await browser.newPage();
 
-    // stabilniejsze na słabszych maszynach
+    // UA jak w Twoim kodzie
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    );
+
     page.setDefaultTimeout(45000);
     page.setDefaultNavigationTimeout(45000);
 
-    // logi requestów (pomaga debugować blokady)
     page.on('console', (msg) => console.log('[page console]', msg.text()));
     page.on('pageerror', (err) => console.log('[page error]', err?.message || err));
 
-    // (opcjonalnie) user-agent
-    await page.setUserAgent(
-      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36'
+    // KROK 1: Otwórz stronę
+    console.log('KROK 1: Otwieram', LOGIN_URL);
+    await page.goto(LOGIN_URL, { waitUntil: 'networkidle2', timeout: 45000 });
+
+    // KROK 2: Klik "Zaloguj się" i czekaj aż pokaże się pole email
+    console.log('KROK 2: Klikam "Zaloguj się" i czekam na formularz...');
+    await clickAndWait(
+      page,
+      'button.LoginRegisterView__column__button',
+      'input[placeholder="Adres email"]',
+      { navigation: true, waitTimeout: 30000 }
     );
 
-    await ensureLoggedIn(page);
+    // KROK 3: Email
+    console.log('KROK 3: Wpisuję email...');
+    await clearAndType(page, 'input[placeholder="Adres email"]', email, 40);
 
-    const data = await fetchDocuments(page, { keyword, pageSize, pageNumber });
+    // KROK 4: Hasło (jak u Ciebie: placeholder "8 znaków" albo password)
+    console.log('KROK 4: Wpisuję hasło...');
+    const passwordPreferred = 'input[placeholder*="8 znaków"]';
+    const passwordFallback = 'input[type="password"]';
 
-    res.json({
-      ok: true,
-      took_ms: Date.now() - started,
-      data,
-    });
-  } catch (err) {
-    console.error('[ERROR]', err);
-    res.status(500).json({
-      ok: false,
-      error: err?.message || String(err),
-      took_ms: Date.now() - started,
-    });
+    const hasPreferred = await page.$(passwordPreferred);
+    if (hasPreferred) {
+      await clearAndType(page, passwordPreferred, password, 40);
+    } else {
+      const hasFallback = await page.$(passwordFallback);
+      if (hasFallback) {
+        await clearAndType(page, passwordFallback, password, 40);
+      } else {
+        throw new Error('Nie znaleziono pola hasła (brak placeholder "8 znaków" i brak input[type="password"])');
+      }
+    }
+
+    // KROK 5: Submit formularza
+    console.log('KROK 5: Klikam "ZALOGUJ SIĘ" (formularz)...');
+    // Uwaga: w Twoim kodzie to button.el-button--primary – zostawiamy, ale po kliknięciu czekamy na 2FA
+    await Promise.allSettled([
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }),
+      page.click('button.el-button--primary'),
+    ]);
+
+    // KROK 6: 2FA – czekamy na input.digit
+    console.log('KROK 6: Czekam na pola 2FA (input.digit)...');
+    await page.waitForSelector('input.digit', { timeout: 20000 });
+
+    // KROK 7: Wpisz kod 2FA w 6 polach
+    console.log('KROK 7: Wpisuję kod 2FA:', totpCode);
+
+    if (typeof totpCode !== 'string' || totpCode.length !== 6) {
+      throw new Error('totp_code musi być stringiem o długości 6, np. "123456"');
+    }
+
+    const digitInputs = await page.$$('input.digit');
+    if (digitInputs.length !== 6) {
+      throw new Error(`Oczekiwano 6 pól na kod 2FA, znaleziono: ${digitInputs.length}`);
+    }
+
+    for (let i = 0; i < 6; i++) {
+      await digitInputs[i].click({ clickCount: 3 }).catch(() => {});
+      await digitInputs[i].type(totpCode[i], { delay: 25 });
+    }
+
+    // KROK 8: Submit 2FA
+    console.log('KROK 8: Klikam "ZALOGUJ SIĘ" (2FA)...');
+    await Promise.allSettled([
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
+      page.click('button.el-button--primary'),
+    ]);
+
+    // KROK 9: Walidacja
+    const currentUrl = page.url();
+    console.log('KROK 9: Obecny URL po logowaniu:', currentUrl);
+
+    // U Ciebie: "callcontact.eu" i nie "auth"
+    const loggedIn = currentUrl.includes('callcontact.eu') && !currentUrl.includes('auth');
+
+    if (!loggedIn) {
+      const screenshot = await page.screenshot({ encoding: 'base64', fullPage: true }).catch(() => null);
+      return {
+        success: false,
+        error: 'Nie udało się zalogować - nieoczekiwany URL po logowaniu',
+        currentUrl,
+        screenshot,
+      };
+    }
+
+    console.log('Zalogowano pomyślnie! Pobieram cookies...');
+    const cookies = await page.cookies();
+
+    return {
+      success: true,
+      message: 'Zalogowano pomyślnie do CallContact',
+      currentUrl,
+      // trzymamy minimalistyczny zestaw jak w Twoim kodzie
+      cookies: cookies.map(c => ({ name: c.name, value: c.value, domain: c.domain })),
+      since_minutes: sinceMinutes, // zostawiam, bo jest w body — może Ci się przyda w kolejnych krokach
+    };
+  } catch (error) {
+    console.error('Błąd:', error.message);
+    return { success: false, error: error.message };
   } finally {
     if (page) await safeClosePage(page);
+    if (browser) await safeCloseBrowser(browser);
   }
+}
+
+/**
+ * POST /login
+ * body: { email, password, totp_code, since_minutes? }
+ * (zgodne z Twoim oryginałem)
+ */
+app.post('/login', async (req, res) => {
+  const { email, password, totp_code, since_minutes = 15 } = req.body || {};
+
+  if (!email || !password || !totp_code) {
+    return res.status(400).json({
+      success: false,
+      error: 'Brakuje wymaganych danych: email, password, totp_code',
+    });
+  }
+
+  console.log(`\n=== Nowe żądanie logowania dla: ${email} ===`);
+  const result = await loginCallContact(email, password, totp_code, since_minutes);
+  res.json(result);
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    message: 'Serwis działa',
+    version: '3.0.0',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get('/', (req, res) => {
+  res.json({
+    name: 'Login Service',
+    version: '3.0.0',
+    endpoints: {
+      'POST /login': 'Logowanie (email + password + totp_code)',
+      'GET /health': 'Sprawdzenie czy serwis działa',
+    },
+  });
 });
 
 app.listen(PORT, () => {
-  console.log(`Server listening on :${PORT}`);
+  console.log(`Login Service v3.0.0 działa na porcie ${PORT}`);
 });
