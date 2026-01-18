@@ -9,6 +9,47 @@ app.use(express.json({ limit: '1mb' }));
 
 const PORT = process.env.PORT || 3000;
 const LOGIN_URL = 'https://user.callcontact.eu/';
+// ========== TOTP Generator ==========
+function base32Decode(encoded) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = '';
+  for (const char of encoded.toUpperCase().replace(/=+$/, '')) {
+    const val = alphabet.indexOf(char);
+    if (val === -1) continue;
+    bits += val.toString(2).padStart(5, '0');
+  }
+  const bytes = [];
+  for (let i = 0; i + 8 <= bits.length; i += 8) {
+    bytes.push(parseInt(bits.slice(i, i + 8), 2));
+  }
+  return new Uint8Array(bytes);
+}
+
+function hmacSha1(key, message) {
+  const crypto = require('crypto');
+  const hmac = crypto.createHmac('sha1', Buffer.from(key));
+  hmac.update(Buffer.from(message));
+  return new Uint8Array(hmac.digest());
+}
+
+function generateTOTP(secret) {
+  const time = Math.floor(Date.now() / 1000 / 30);
+  const timeBytes = new Uint8Array(8);
+  const view = new DataView(timeBytes.buffer);
+  view.setBigUint64(0, BigInt(time), false);
+  
+  const key = base32Decode(secret);
+  const hmac = hmacSha1(key, timeBytes);
+  
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const code = ((hmac[offset] & 0x7f) << 24 |
+                (hmac[offset + 1] & 0xff) << 16 |
+                (hmac[offset + 2] & 0xff) << 8 |
+                (hmac[offset + 3] & 0xff)) % 1000000;
+  
+  return code.toString().padStart(6, '0');
+}
+// ========== End TOTP Generator ==========
 
 async function safeClosePage(page) {
   try { await page.close(); } catch (_) {}
@@ -31,7 +72,7 @@ async function clearAndType(page, selector, value, timeout = 25000, delay = 20) 
   await page.type(selector, value, { delay });
 }
 
-async function loginCallContact({ email, password, totp_code, since_minutes = 15 }) {
+async function loginCallContact({ email, password, totp_secret, since_minutes = 15 }) {
   let browser = null;
   let page = null;
 
@@ -40,12 +81,9 @@ async function loginCallContact({ email, password, totp_code, since_minutes = 15
   const net_errors = [];
 
   try {
-    if (!email || !password || !totp_code) {
-      throw new Error('Brakuje wymaganych pól: email, password, totp_code');
-    }
-    if (typeof totp_code !== 'string' || totp_code.length !== 6) {
-      throw new Error('totp_code musi być stringiem o długości 6, np. "123456"');
-    }
+   if (!email || !password || !totp_secret) {
+  throw new Error('Brakuje wymaganych pól: email, password, totp_secret');
+}
 
     console.log('[1] Launch browser');
     browser = await puppeteer.launch({
@@ -225,7 +263,9 @@ async function loginCallContact({ email, password, totp_code, since_minutes = 15
         screenshot,
       };
     }
-
+// Generuj świeży kod TOTP tuż przed użyciem
+const totp_code = generateTOTP(totp_secret);
+console.log('[8.5] Generated fresh TOTP code');
     console.log('[9] Fill 2FA code');
     for (let i = 0; i < 6; i++) {
       await digitInputs[i].click({ clickCount: 3 }).catch(() => {});
