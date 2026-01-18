@@ -299,68 +299,101 @@ console.log('[8.5] Generated fresh TOTP code');
     }
 
     const cookies = await page.cookies();
+    console.log('[12] Zalogowano, pobieram listę połączeń...');
+
+    // Oblicz daty (od since_minutes temu do teraz)
+    const now = new Date();
+    const since = new Date(now.getTime() - (since_minutes * 60 * 1000));
+    const dateFrom = since.toISOString().split('T')[0];
+    const dateTo = now.toISOString().split('T')[0];
+
+    // Pobierz listę połączeń przez API
+    const connectionsUrl = `https://user.callcontact.eu/api/connections/getList?filtering_criteria[date_from]=${dateFrom}&filtering_criteria[date_to]=${dateTo}&page=1&page_size=100&sorting_direction=2`;
+    
+    console.log('[13] Pobieram połączenia:', connectionsUrl);
+    
+    const connectionsResponse = await page.evaluate(async (url) => {
+      try {
+        const res = await fetch(url, {
+          method: 'GET',
+          credentials: 'include',
+          headers: {
+            'Accept': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+          }
+        });
+        return await res.json();
+      } catch (e) {
+        return { error: e.message };
+      }
+    }, connectionsUrl);
+
+    console.log('[14] Odpowiedź API connections:', JSON.stringify(connectionsResponse).substring(0, 200));
+
+    if (connectionsResponse.error || !connectionsResponse.data) {
+      return {
+        success: true,
+        message: 'Zalogowano, ale błąd przy pobieraniu listy połączeń',
+        currentUrl,
+        cookies: cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain })),
+        connectionsError: connectionsResponse.error || 'Brak danych',
+        blocked_403,
+        net_errors,
+      };
+    }
+
+    const allConnections = connectionsResponse.data.records || [];
+    const withRecording = allConnections.filter(conn => conn._recorded === true);
+    
+    console.log(`[15] Znaleziono ${allConnections.length} połączeń, ${withRecording.length} z nagraniem`);
+
+    // Pobierz nagrania dla każdego połączenia z nagraniem
+    const recordings = [];
+    for (const conn of withRecording) {
+      console.log(`[16] Pobieram nagranie dla connectionId: ${conn._id}`);
+      
+      const recordingUrl = `https://user.callcontact.eu/api/record/download?connection=${conn._id}`;
+      
+      const recordingData = await page.evaluate(async (url) => {
+        try {
+          const res = await fetch(url, {
+            method: 'GET',
+            credentials: 'include'
+          });
+          const text = await res.text();
+          return { success: true, data: text, contentType: res.headers.get('content-type') };
+        } catch (e) {
+          return { success: false, error: e.message };
+        }
+      }, recordingUrl);
+
+      recordings.push({
+        connectionId: conn._id,
+        filename: conn._filename,
+        agentName: conn._agent_name,
+        numberClient: conn._number_a,
+        numberAgent: conn._number_b,
+        callStart: conn._call_start,
+        callEnd: conn._call_end,
+        talkingTime: conn._talking_time,
+        effect: conn._effect,
+        effectName: conn._effect_name,
+        recording: recordingData
+      });
+    }
+
+    console.log(`[17] Pobrano ${recordings.length} nagrań`);
 
     return {
       success: true,
-      message: 'Zalogowano pomyślnie',
+      message: `Zalogowano i pobrano ${recordings.length} nagrań`,
       currentUrl,
       since_minutes,
+      dateRange: { from: dateFrom, to: dateTo },
+      totalConnections: allConnections.length,
+      connectionsWithRecording: withRecording.length,
+      recordings,
       cookies: cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain })),
-      // >>> najważniejsze: zwracamy diagnostykę także przy sukcesie
       blocked_403,
       net_errors,
     };
-  } catch (e) {
-    console.error('[ERROR]', e?.message || e);
-
-    const screenshot = page ? await page.screenshot({ encoding: 'base64', fullPage: true }).catch(() => null) : null;
-
-    return {
-      success: false,
-      error: e?.message || String(e),
-      currentUrl: page ? page.url() : null,
-      blocked_403,
-      net_errors,
-      screenshot,
-    };
-  } finally {
-    if (page) await safeClosePage(page);
-    if (browser) await safeCloseBrowser(browser);
-  }
-}
-
-// ---------- ROUTES ----------
-
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    port: PORT,
-    timestamp: new Date().toISOString(),
-  });
-});
-
-app.post('/login', async (req, res) => {
-  const started = Date.now();
-
-  const result = await loginCallContact(req.body || {});
-  const statusCode = result.success ? 200 : 500;
-
-  res.status(statusCode).json({
-    ...result,
-    took_ms: Date.now() - started,
-  });
-});
-
-app.get('/', (req, res) => {
-  res.json({
-    name: 'CallContact Login Service',
-    endpoints: {
-      'GET /health': 'healthcheck',
-      'POST /login': 'email + password + totp_code -> cookies + blocked_403',
-    },
-  });
-});
-
-app.listen(PORT, () => {
-  console.log(`Service running on port ${PORT}`);
-});
