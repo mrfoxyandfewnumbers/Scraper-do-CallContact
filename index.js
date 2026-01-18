@@ -67,13 +67,8 @@ await page.click('button.LoginRegisterView__column__button');
         
         // KROK 6: Klikamy ZALOGUJ SIĘ
         console.log('Klikam ZALOGUJ SIĘ (logowanie)...');
-        const submitButton = await page.evaluateHandle(() => {
-            const buttons = [...document.querySelectorAll('button')];
-            return buttons.find(b => b.textContent.includes('ZALOGUJ SIĘ'));
-        });
-        
-        if (submitButton) {
-            await submitButton.click();
+       console.log('Klikam przycisk ZALOGUJ SIĘ (formularz)...');
+await page.click('button.el-button--primary');
         } else {
             throw new Error('Nie znaleziono przycisku ZALOGUJ SIĘ');
         }
@@ -97,13 +92,8 @@ await page.click('button.LoginRegisterView__column__button');
         
         // KROK 9: Klikamy ZALOGUJ SIĘ (2FA)
         console.log('Klikam ZALOGUJ SIĘ (2FA)...');
-        const submit2faButton = await page.evaluateHandle(() => {
-            const buttons = [...document.querySelectorAll('button')];
-            return buttons.find(b => b.textContent.includes('ZALOGUJ SIĘ'));
-        });
-        
-        if (submit2faButton) {
-            await submit2faButton.click();
+     console.log('Klikam przycisk ZALOGUJ SIĘ (2FA)...');
+await page.click('button.el-button--primary');
         }
         
         // KROK 10: Czekamy na przekierowanie do panelu
